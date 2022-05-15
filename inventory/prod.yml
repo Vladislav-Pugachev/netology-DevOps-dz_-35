@@ -1,0 +1,13 @@
+---
+localhost:
+  hosts:
+    localhost:
+      ansible_connection: local
+vector:
+  hosts:
+    vector:
+      ansible_connection: docker
+clickhouse:
+  hosts:
+    clickhouse:
+      ansible_connection: docker

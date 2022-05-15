@@ -1,0 +1,52 @@
+# Change this to use a non-default directory for Vector data storage:
+data_dir = "/var/lib/vector"
+
+# Random Syslog-formatted logs
+[sources.docker_log]
+type = "docker_logs"
+docker_host = "http://{{ local_ip }}:2370"
+include_containers = [ "test" ]
+
+# Parse Syslog logs
+# See the Vector Remap Language reference for more info: https://vrl.dev
+#[transforms.parse_logs]
+#type = "remap"
+#inputs = ["my_source_id"]
+#source = '''
+#. = parse_syslog!(string!(.message))
+#'''
+
+# Print parsed logs to stdout
+[sinks.print]
+type = "console"
+inputs = ["docker_log"]
+encoding.codec = "json"
+
+[sinks.my_sink_id]
+type = "clickhouse"
+inputs = ["docker_log"]
+endpoint = "http://{{ ip_clickhouse }}:8123"
+database = "logs"
+table = "test"
+skip_unknown_fields = true
+#compression = "gzip"
+#encoding.codec = "json"
+#encoding = "ndjson"
+
+
+
+[sinks.to_file]
+type = "file"
+inputs = [ "docker_log" ]
+compression = "none"
+path = "/var/lib/vector/vector-%Y-%m-%d.log"
+
+  [sinks.to_file.encoding]
+   codec = "text"
+
+# Vector's GraphQL API (disabled by default)
+# Uncomment to try it out with the `vector top` command or
+# in your browser at http://localhost:8686
+#[api]
+#enabled = true
+#address = "127.0.0.1:8686"

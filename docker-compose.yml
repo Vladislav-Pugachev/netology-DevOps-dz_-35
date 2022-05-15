@@ -1,0 +1,15 @@
+version: "3.9"
+services:
+  vector:
+    image: centos/vector-0.21.1:v.1.0
+    container_name: vector
+    volumes:
+      - ./vector/data:/var/lib/vector
+  test:
+    image: centos/vector-0.21.1:v.1.0
+    container_name: test
+  clickhouse:
+    image: centos/clickhouse-22.3.3.44:v.1.0
+    container_name: clickhouse
+    ports:
+      - 8123:8123

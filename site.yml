@@ -1,0 +1,232 @@
+---
+- name: download package
+  hosts: localhost
+  tasks:
+    - name: Print all available facts
+      ansible.builtin.debug:
+        var: ansible_facts
+    - name: set fact ip local
+      ansible.builtin.set_fact:
+        local_ip: "{{ ansible_facts.default_ipv4.address }}"
+    - name: add fact local_ip to var vector
+      ansible.builtin.lineinfile:
+        search_string: 'local_ip'
+        line: "local_ip: {{ local_ip }}"
+        dest: "./group_vars/vector/vars.yml"
+    - name: current pwd
+      ansible.builtin.shell: pwd
+      register: play_pwd
+      tags: always
+    - name: Create dir for vector
+      ansible.builtin.file:
+        path: "{{ play_pwd.stdout }}/vector/vector-{{ vector_version }}"
+        state: directory
+        mode: '0755'
+      tags: vector
+    - name: Create dir for vector
+      ansible.builtin.file:
+        path: "{{ play_pwd.stdout }}/vector/data"
+        state: directory
+        mode: '0755'
+      tags: vector
+    - name: Get archive vector
+      ansible.builtin.get_url:
+        url: https://packages.timber.io/vector/{{ vector_version }}/vector-{{ vector_version }}-x86_64-unknown-linux-gnu.tar.gz
+        dest: "{{ play_pwd.stdout }}/vector/vector-{{ vector_version }}-x86_64-unknown-linux-gnu.tar.gz"
+      tags: vector
+    - name: unarchive vector
+      ansible.builtin.unarchive:
+        src: ./vector/vector-{{ vector_version }}-x86_64-unknown-linux-gnu.tar.gz
+        dest: "{{ play_pwd.stdout }}/vector/vector-{{ vector_version }}"
+        extra_opts: [--strip-components=2]
+      tags: vector
+    - name: Remove archive
+      ansible.builtin.file:
+        path: ./vector/vector-{{ vector_version }}-x86_64-unknown-linux-gnu.tar.gz
+        state: absent
+      tags: vector
+    - name: Create dir for clickhouse
+      ansible.builtin.file:
+        path: ./clickhouse/clickhouse-{{ clickhouse_version }}
+        state: directory
+        mode: '0755'
+      tags: clickhouse
+    - name: Get clickhouse
+      tags: clickhouse
+      block:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/{{ item }}-{{ clickhouse_version }}.noarch.rpm"
+            dest: "{{ play_pwd.stdout }}/clickhouse/clickhouse-{{ clickhouse_version }}/{{ item }}-{{ clickhouse_version }}.rpm"
+          with_items: "{{ clickhouse_packages }}"
+      rescue:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/clickhouse-common-static-{{ clickhouse_version }}.x86_64.rpm"
+            dest: "{{ play_pwd.stdout }}/clickhouse/clickhouse-{{ clickhouse_version }}/clickhouse-common-static-{{ clickhouse_version }}.rpm"
+- name: build image docker
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: build vector container
+      community.docker.docker_image:
+        build:
+          path: "{{ play_pwd.stdout }}/vector/"
+        name: centos/vector-{{ vector_version }}
+        tag: v.1.0
+        source: build
+      tags: vector
+    - name: build clickhouse container
+      community.docker.docker_image:
+        build:
+          path: "{{ play_pwd.stdout }}/clickhouse/"
+        name: centos/clickhouse-{{ clickhouse_version }}
+        tag: v.1.0
+        source: build
+      tags: clickhouse
+- name: remove image docker and files
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: remove image
+      tags: never
+      block:
+        - name: stop service
+          community.docker.docker_compose:
+            project_src: .
+            state: absent
+        - name: remove image vector
+          community.docker.docker_image:
+            state: absent
+            force_absent: yes
+            name: centos/vector-{{ vector_version }}
+            tag: v.1.0
+        - name: remove image clickhouse
+          community.docker.docker_image:
+            state: absent
+            force_absent: yes
+            name: centos/clickhouse-{{ clickhouse_version }}
+            tag: v.1.0
+        - name: Remove archive vector
+          ansible.builtin.file:
+            path: ./vector/vector-{{ vector_version }}
+            state: absent
+        - name: Remove data vector
+          ansible.builtin.file:
+            path: ./vector/data
+            state: absent
+            force: yes
+        - name: Remove archive clickhouse
+          ansible.builtin.file:
+            path: ./clickhouse/clickhouse-{{ clickhouse_version }}
+            state: absent
+- name: run docker compose
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: start services
+      community.docker.docker_compose:
+        project_src: .
+      register: output
+    - name: status docker
+      ansible.builtin.debug:
+        var: output
+    - name: set fact ip clickhouse
+      ansible.builtin.set_fact:
+        ip_clickhouse: "{{ item.value.IPAddress }}"
+      with_dict: "{{ output.services.clickhouse.clickhouse.networks }}"
+    - name: add fact to var vector
+      ansible.builtin.lineinfile:
+        search_string: 'ip_clickhouse'
+        line: "ip_clickhouse: {{ ip_clickhouse }}"
+        dest: "./group_vars/vector/vars.yml"
+    - name: add fact to var clickhouse
+      ansible.builtin.copy:
+        content: "ip_clickhouse: {{ ip_clickhouse }}"
+        dest: "./group_vars/clickhouse/vars.yml"
+- name: configure service vector
+  hosts: vector
+  gather_facts: false
+  handlers:
+    - name: restart docker compose
+      community.docker.docker_compose:
+        project_src: .
+        restarted: yes
+        build: no
+      delegate_to: localhost
+  tasks:
+    - name: copy vector config
+      ansible.builtin.template:
+        src: ./template/vector/vector.toml.j2
+        dest: /etc/vector/vector.toml
+        owner: root
+        group: root
+        mode: 0755
+      tags: config
+- name: configure service clickhouse
+  hosts: clickhouse
+  gather_facts: false
+  handlers:
+    - name: restart docker compose
+      community.docker.docker_compose:
+        project_src: .
+        restarted: yes
+        build: no
+      delegate_to: localhost
+      tags: config
+  tasks:
+    - name: copy clickhouse server config
+      ansible.builtin.template:
+        src: ./template/clickhouse/config.xml.j2
+        dest: /etc/clickhouse-server/config.xml
+        owner: clickhouse
+        group: clickhouse
+        mode: 0755
+      tags: config
+      notify: restart docker compose
+    - block:
+      - name: Create database
+        ansible.builtin.command: "clickhouse-client -q  'create database logs;'"
+        register: create_db
+        failed_when: create_db.rc != 0 and create_db.rc !=82
+        changed_when: create_db.rc == 0
+        tags: config
+      - name: Create table
+        ansible.builtin.command: "clickhouse-client -q  'create table logs.test ('message' String) ENGINE = MergeTree() ORDER BY tuple();'"
+        register: create_table
+        failed_when: create_table.rc != 0 and create_table.rc !=57
+        changed_when: create_db.rc == 0
+        tags: config
+      rescue:
+      - name: Create database
+        ansible.builtin.command: "clickhouse-client -q -h {{ ip_clickhouse }} 'create database logs;'"
+        register: create_db
+        failed_when: create_db.rc != 0 and create_db.rc !=82
+        changed_when: create_db.rc == 0
+        tags: config
+      - name: Create table
+        ansible.builtin.command: "clickhouse-client -q  -h {{ ip_clickhouse }} 'create table logs.test ('message' String) ENGINE = MergeTree() ORDER BY tuple();'"
+        register: create_table
+        failed_when: create_table.rc != 0 and create_table.rc !=57
+        changed_when: create_db.rc == 0
+        tags: config
+    - name: Recursively change ownership of a directory
+      ansible.builtin.file:
+        path: /var/lib/clickhouse/preprocessed_configs
+        state: directory
+        recurse: yes
+        owner: clickhouse
+        group: clickhouse
+      tags: config
+    - name: Recursively change ownership of a directory
+      ansible.builtin.file:
+        path: /var/log/clickhouse-server
+        state: directory
+        recurse: yes
+        owner: clickhouse
+        group: clickhouse
+      tags: config
+    - name: current pwd
+      ansible.builtin.shell: pwd
+      tags: always
+      notify: restart docker compose
